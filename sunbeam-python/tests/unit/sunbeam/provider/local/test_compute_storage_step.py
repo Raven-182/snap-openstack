@@ -42,6 +42,7 @@ class TestPrompt:
     def test_prompt_uses_config(self):
         step, _client, _jhelper = make_step(make_config())
 
+        assert step.has_prompts() is True
         step.prompt(Console(), show_hint=False)
 
         assert step.target == "/dev/disk/by-id/wwn-0x1"
@@ -150,3 +151,52 @@ class TestRun:
 
         assert result.result_type == ResultType.FAILED
         _ = client
+
+    def test_prompt_interactive(self):
+        step, _client, _jhelper = make_step(None)
+        with (
+            mock.patch(
+                "sunbeam.provider.local.steps.sunbeam.core.questions.PromptQuestion"
+            ) as prompt_question,
+            mock.patch(
+                "sunbeam.provider.local.steps.sunbeam.core.questions."
+                "PasswordPromptQuestion"
+            ) as password_question,
+            mock.patch(
+                "sunbeam.provider.local.steps.get_vault_kv_offer_url",
+                return_value=None,
+            ),
+        ):
+            prompt_question.return_value.ask.side_effect = [
+                "/dev/disk/by-id/wwn-0x9",
+                "vault.vault-kv",
+            ]
+            password_question.return_value.ask.return_value = "s3cret"
+
+            step.prompt(Console(), show_hint=False)
+
+        assert step.target == "/dev/disk/by-id/wwn-0x9"
+        assert step.passphrase == "s3cret"
+        assert step.vault_offer_url == "vault.vault-kv"
+
+    def test_prompt_interactive_reuses_existing_offer(self):
+        step, _client, _jhelper = make_step(None)
+        with (
+            mock.patch(
+                "sunbeam.provider.local.steps.sunbeam.core.questions.PromptQuestion"
+            ) as prompt_question,
+            mock.patch(
+                "sunbeam.provider.local.steps.sunbeam.core.questions."
+                "PasswordPromptQuestion"
+            ) as password_question,
+            mock.patch(
+                "sunbeam.provider.local.steps.get_vault_kv_offer_url",
+                return_value="existing.vault-kv",
+            ),
+        ):
+            prompt_question.return_value.ask.return_value = "/dev/disk/by-id/wwn-0x9"
+            password_question.return_value.ask.return_value = "s3cret"
+
+            step.prompt(Console(), show_hint=False)
+
+        assert step.vault_offer_url is None
