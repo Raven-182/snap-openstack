@@ -29,6 +29,10 @@ from sunbeam.core.common import (
     SunbeamException,
     parse_ip_range_or_cidr,
 )
+from sunbeam.core.compute_storage import (
+    get_vault_kv_offer_url,
+    set_vault_kv_offer_url,
+)
 from sunbeam.core.juju import (
     ActionFailedException,
     JujuHelper,
@@ -995,5 +999,127 @@ class LocalConfigDPDKStep(BaseConfigDPDKStep):
             msg = f"Unable to set hypervisor {name} configuration"
             LOG.warning(msg)
             return Result(ResultType.FAILED, msg)
+
+        return Result(ResultType.COMPLETED)
+
+
+ENCRYPTED_STORAGE_APP = "vaultlocker-hypervisor"
+HYPERVISOR_APP = "openstack-hypervisor"
+CONFIGURE_ENCRYPTED_STORAGE_ACTION = "configure-encrypted-storage"
+
+
+class LocalConfigureEncryptedStorageStep(BaseStep):
+    """Configure encrypted compute storage on the local compute host."""
+
+    def __init__(
+        self,
+        client: Client,
+        node_name: str,
+        jhelper: JujuHelper,
+        model: str,
+        config=None,
+    ):
+        """Initialise the step.
+
+        :param config: optional ``ComputeStorageConfig`` for non-interactive
+            invocation. When omitted the operator is prompted.
+        """
+        super().__init__(
+            "Configure encrypted compute storage",
+            "Configuring encrypted compute storage",
+        )
+        self.client = client
+        self.node_name = node_name
+        self.jhelper = jhelper
+        self.model = model
+        self.config = config
+        self.target: str | None = None
+        self.passphrase: str | None = None
+        self.existing_key_secret_id: str | None = None
+        self.vault_offer_url: str | None = None
+
+    def has_prompts(self) -> bool:
+        """Return True when the step can prompt for input."""
+        return True
+
+    def prompt(self, console: Console | None = None, show_hint: bool = False) -> None:
+        """Collect the storage target, credential and Vault offer."""
+        if self.config is not None:
+            node = self.config.nodes.get(self.node_name)
+            if node is None:
+                raise SunbeamException(
+                    f"No encrypted compute-storage configuration for {self.node_name}"
+                )
+            self.target = node.target
+            self.existing_key_secret_id = node.existing_key_secret_id
+            self.vault_offer_url = self.config.vault_offer_url
+            return
+
+        if console is None:
+            return
+
+        self.target = sunbeam.core.questions.PromptQuestion(
+            "Encrypted compute storage target (persistent device path)"
+        ).ask()
+        self.passphrase = sunbeam.core.questions.PasswordPromptQuestion(
+            "Existing LUKS passphrase"
+        ).ask()
+        if get_vault_kv_offer_url(self.client) is None:
+            self.vault_offer_url = sunbeam.core.questions.PromptQuestion(
+                "External vault-kv offer URL"
+            ).ask()
+
+    def is_skip(self, context: StepContext) -> Result:
+        """Skip when no target could be determined."""
+        if self.target is None and self.config is None:
+            return Result(
+                ResultType.FAILED,
+                "Encrypted compute storage target is required",
+            )
+        return Result(ResultType.COMPLETED)
+
+    def run(self, context: StepContext) -> Result:
+        """Enroll the target and wait for the hypervisor action to complete."""
+        if self.vault_offer_url:
+            try:
+                set_vault_kv_offer_url(self.client, self.vault_offer_url)
+            except ValueError as e:
+                return Result(ResultType.FAILED, str(e))
+
+        self.update_status(context, "creating temporary credential secret")
+        secret_name = None
+        secret_id = self.existing_key_secret_id
+        if secret_id is None:
+            secret_name = "compute-storage-{}".format(self.node_name.replace(".", "-"))
+            secret_id = self.jhelper.add_secret(
+                self.model,
+                secret_name,
+                {"passphrase": self.passphrase or ""},
+                "Temporary existing LUKS passphrase for encrypted storage",
+            )
+            self.jhelper.grant_secret(self.model, secret_name, ENCRYPTED_STORAGE_APP)
+        else:
+            # Operator-provided secret: grant the vaultlocker unit access.
+            self.jhelper.grant_secret(self.model, secret_id, ENCRYPTED_STORAGE_APP)
+
+        try:
+            self.update_status(context, "enrolling encrypted storage")
+            unit = self.jhelper.get_leader_unit(HYPERVISOR_APP, self.model)
+            self.jhelper.run_action(
+                unit,
+                self.model,
+                CONFIGURE_ENCRYPTED_STORAGE_ACTION,
+                {
+                    "target": self.target,
+                    "existing-key-secret-id": secret_id,
+                },
+                timeout=1800,
+            )
+        except ActionFailedException as e:
+            return Result(ResultType.FAILED, str(e))
+        finally:
+            if secret_name is not None:
+                with contextlib.suppress(Exception):
+                    self.jhelper.remove_secret(self.model, secret_name)
 
         return Result(ResultType.COMPLETED)

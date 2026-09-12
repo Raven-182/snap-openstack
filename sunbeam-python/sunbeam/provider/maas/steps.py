@@ -43,6 +43,9 @@ from sunbeam.core.common import (
     StepContext,
     parse_ip_range,
 )
+from sunbeam.core.compute_storage import (
+    set_vault_kv_offer_url,
+)
 from sunbeam.core.deployment import CertPair, Networks
 from sunbeam.core.deployments import DeploymentsConfig
 from sunbeam.core.juju import (
@@ -2807,5 +2810,67 @@ class MaasConfigDPDKStep(BaseConfigDPDKStep):
                 msg = f"Unable to set hypervisor {node_name} configuration"
                 LOG.warning(msg)
                 return Result(ResultType.FAILED, msg)
+
+        return Result(ResultType.COMPLETED)
+
+
+ENCRYPTED_STORAGE_APP = "vaultlocker-hypervisor"
+ENCRYPTED_STORAGE_HYPERVISOR_APP = "openstack-hypervisor"
+CONFIGURE_ENCRYPTED_STORAGE_ACTION = "configure-encrypted-storage"
+
+
+class MaasConfigureEncryptedStorageStep(BaseStep):
+    """Configure encrypted compute storage for MAAS compute hosts."""
+
+    def __init__(
+        self,
+        client: Client,
+        jhelper: JujuHelper,
+        model: str,
+        config,
+    ):
+        """Initialise the step with a compute-storage configuration."""
+        super().__init__(
+            "Configure encrypted compute storage",
+            "Configuring encrypted compute storage",
+        )
+        self.client = client
+        self.jhelper = jhelper
+        self.model = model
+        self.config = config
+
+    def run(self, context: StepContext) -> Result:
+        """Enroll each configured host independently."""
+        try:
+            set_vault_kv_offer_url(self.client, self.config.vault_offer_url)
+        except ValueError as e:
+            return Result(ResultType.FAILED, str(e))
+
+        for node_name, node in self.config.nodes.items():
+            self.update_status(context, f"enrolling encrypted storage on {node_name}")
+            try:
+                self.jhelper.grant_secret(
+                    self.model,
+                    node.existing_key_secret_id,
+                    ENCRYPTED_STORAGE_APP,
+                )
+                machine_id = self.client.cluster.get_node_info(node_name)["machine_id"]
+                unit = self.jhelper.get_unit_from_machine(
+                    ENCRYPTED_STORAGE_HYPERVISOR_APP,
+                    machine_id,
+                    self.model,
+                )
+                self.jhelper.run_action(
+                    unit,
+                    self.model,
+                    CONFIGURE_ENCRYPTED_STORAGE_ACTION,
+                    {
+                        "target": node.target,
+                        "existing-key-secret-id": node.existing_key_secret_id,
+                    },
+                    timeout=1800,
+                )
+            except ActionFailedException as e:
+                return Result(ResultType.FAILED, f"{node_name}: {e}")
 
         return Result(ResultType.COMPLETED)
