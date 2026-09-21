@@ -28,11 +28,17 @@ def make_config():
     )
 
 
-def make_step(config=None):
+def make_step(config=None, deployment=None, result_tfvars=None):
     client = mock.MagicMock()
     jhelper = mock.MagicMock()
     step = LocalConfigureEncryptedStorageStep(
-        client, NODE, jhelper, "machine-model", config
+        client,
+        NODE,
+        jhelper,
+        "machine-model",
+        deployment or mock.MagicMock(),
+        config=config,
+        result_tfvars=result_tfvars,
     )
     step.update_status = mock.MagicMock()
     return step, client, jhelper
@@ -81,6 +87,18 @@ class TestIsSkip:
 
 
 class TestRun:
+    @pytest.fixture(autouse=True)
+    def no_guests(self):
+        """Default the "no instances remain" guard to pass for every test."""
+        with (
+            mock.patch("sunbeam.provider.local.steps.get_admin_connection"),
+            mock.patch(
+                "sunbeam.provider.local.steps.guests_on_hypervisor",
+                return_value=[],
+            ) as guests,
+        ):
+            yield guests
+
     def test_run_with_config(self):
         step, client, jhelper = make_step(make_config())
         step.prompt(Console(), show_hint=False)
@@ -107,6 +125,38 @@ class TestRun:
             timeout=1800,
         )
         jhelper.add_secret.assert_not_called()
+
+    def test_run_populates_result_tfvars(self):
+        result_tfvars: dict = {}
+        step, client, jhelper = make_step(make_config(), result_tfvars=result_tfvars)
+        step.prompt(Console(), show_hint=False)
+        jhelper.get_leader_unit.return_value = "openstack-hypervisor/0"
+
+        with (
+            mock.patch("sunbeam.provider.local.steps.set_vault_kv_offer_url"),
+            mock.patch(
+                "sunbeam.provider.local.steps.get_vault_kv_offer_url",
+                return_value="vault.vault-kv",
+            ),
+        ):
+            result = step.run(mock.MagicMock())
+
+        assert result.result_type == ResultType.COMPLETED
+        assert result_tfvars == {"vault-kv-offer-url": "vault.vault-kv"}
+
+    def test_run_fails_when_instances_remain(self, no_guests):
+        no_guests.return_value = [mock.MagicMock(), mock.MagicMock()]
+        step, _client, jhelper = make_step(make_config())
+        step.prompt(Console(), show_hint=False)
+
+        with mock.patch("sunbeam.provider.local.steps.set_vault_kv_offer_url"):
+            result = step.run(mock.MagicMock())
+
+        assert result.result_type == ResultType.FAILED
+        assert "2 instance" in result.message
+        jhelper.add_secret.assert_not_called()
+        jhelper.grant_secret.assert_not_called()
+        jhelper.run_action.assert_not_called()
 
     def test_run_interactive_creates_and_removes_secret(self):
         step, client, jhelper = make_step(None)

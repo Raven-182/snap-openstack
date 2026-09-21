@@ -2088,18 +2088,31 @@ def configure_compute_storage(
     deployment: MaasDeployment = ctx.obj
     client = deployment.get_client()
     config = load_compute_storage_config(config_path)
+    manifest = deployment.get_manifest()
 
     # Login to the Juju controller
     run_preflight_checks([JujuLoginCheck(deployment.juju_account)], console)
 
     jhelper = JujuHelper(deployment.juju_controller)
+    tfhelper_hypervisor = deployment.get_tfhelper("hypervisor-plan")
 
+    reapply_tfvars: dict = {}
     plan: list[BaseStep] = [
         MaasConfigureEncryptedStorageStep(
             client,
             jhelper,
             deployment.openstack_machines_model,
             config,
+            deployment=deployment,
+            result_tfvars=reapply_tfvars,
+        ),
+        ReapplyHypervisorTerraformPlanStep(
+            client,
+            tfhelper_hypervisor,
+            jhelper,
+            manifest,
+            model=deployment.openstack_machines_model,
+            extra_tfvars=reapply_tfvars,
         ),
     ]
     run_plan(plan, console, show_hints)

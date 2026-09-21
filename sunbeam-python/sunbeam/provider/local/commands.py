@@ -1181,19 +1181,32 @@ def configure_compute_storage(
         )
 
     config = load_compute_storage_config(config_path) if config_path else None
+    manifest = deployment.get_manifest()
 
     # Login to the Juju controller
     run_preflight_checks([JujuLoginCheck(deployment.juju_account)], console)
 
     jhelper = deployment.get_juju_helper()
+    tfhelper_hypervisor = deployment.get_tfhelper("hypervisor-plan")
 
+    reapply_tfvars: dict = {}
     plan: list[BaseStep] = [
         LocalConfigureEncryptedStorageStep(
             client,
             fqdn,
             jhelper,
             deployment.openstack_machines_model,
-            config,
+            deployment,
+            config=config,
+            result_tfvars=reapply_tfvars,
+        ),
+        ReapplyHypervisorTerraformPlanStep(
+            client,
+            tfhelper_hypervisor,
+            jhelper,
+            manifest,
+            model=deployment.openstack_machines_model,
+            extra_tfvars=reapply_tfvars,
         ),
     ]
     run_plan(plan, console, show_hints)

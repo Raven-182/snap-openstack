@@ -33,12 +33,14 @@ from sunbeam.core.compute_storage import (
     get_vault_kv_offer_url,
     set_vault_kv_offer_url,
 )
+from sunbeam.core.deployment import Deployment
 from sunbeam.core.juju import (
     ActionFailedException,
     JujuHelper,
     UnitNotFoundException,
 )
 from sunbeam.core.manifest import Manifest
+from sunbeam.core.openstack_api import get_admin_connection, guests_on_hypervisor
 from sunbeam.provider.common import nic_utils
 from sunbeam.steps import hypervisor, microovn
 from sunbeam.steps.cluster_status import ClusterStatusStep
@@ -1017,12 +1019,20 @@ class LocalConfigureEncryptedStorageStep(BaseStep):
         node_name: str,
         jhelper: JujuHelper,
         model: str,
+        deployment: Deployment,
         config=None,
+        result_tfvars: dict | None = None,
     ):
         """Initialise the step.
 
+        :param deployment: deployment used to obtain an OpenStack admin
+            connection for the "no instances remain" guard.
         :param config: optional ``ComputeStorageConfig`` for non-interactive
             invocation. When omitted the operator is prompted.
+        :param result_tfvars: optional dict mutated in place with the
+            current ``vault-kv-offer-url`` on a successful run, so a
+            subsequent ``ReapplyHypervisorTerraformPlanStep`` in the same
+            plan picks it up.
         """
         super().__init__(
             "Configure encrypted compute storage",
@@ -1033,6 +1043,8 @@ class LocalConfigureEncryptedStorageStep(BaseStep):
         self.jhelper = jhelper
         self.model = model
         self.config = config
+        self.deployment = deployment
+        self.result_tfvars = result_tfvars
         self.target: str | None = None
         self.passphrase: str | None = None
         self.existing_key_secret_id: str | None = None
@@ -1085,6 +1097,21 @@ class LocalConfigureEncryptedStorageStep(BaseStep):
                 set_vault_kv_offer_url(self.client, self.vault_offer_url)
             except ValueError as e:
                 return Result(ResultType.FAILED, str(e))
+
+        if self.result_tfvars is not None:
+            self.result_tfvars["vault-kv-offer-url"] = get_vault_kv_offer_url(
+                self.client
+            )
+
+        self.update_status(context, "checking for instances on the host")
+        conn = get_admin_connection(self.jhelper, self.deployment)
+        guests = guests_on_hypervisor(self.node_name, conn)
+        if guests:
+            return Result(
+                ResultType.FAILED,
+                f"{len(guests)} instance(s) still assigned to {self.node_name}; "
+                "migrate or delete them first",
+            )
 
         self.update_status(context, "creating temporary credential secret")
         secret_name = None

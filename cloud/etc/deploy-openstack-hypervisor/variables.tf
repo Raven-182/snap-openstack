@@ -105,5 +105,5 @@ variable "vault-kv-offer-url" {
 variable "vaultlocker-charm-channel" {
   description = "Charm channel for the vaultlocker subordinate"
   type        = string
-  default     = "latest/stable"
+  default     = "latest/edge"
 }
